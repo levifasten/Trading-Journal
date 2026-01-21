@@ -3,154 +3,246 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Journal Pro</title>
+    <title>Cloud Trading Journal</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        // --- PASTE YOUR FIREBASE CONFIG HERE ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyDMEkiy3VjmLwCvIiTJRicXI9jxmkDELrk",
+            authDomain: "my-trading-journal-deffe.firebaseapp.com",
+            projectId: "my-trading-journal-deffe",
+            storageBucket: "my-trading-journal-deffe.firebasestorage.app",
+            messagingSenderId: "264398734800",
+            appId: "1:264398734800:web:74c6c6c5aef692424825d5"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const FINNHUB_KEY = "d5om819r01qjast7ji4gd5om819r01qjast7ji50";
+
+        let currentTrades = [];
+        let winLossChart;
+        let editingId = null;
+
+        const tradesCol = collection(db, "trades");
+        const q = query(tradesCol, orderBy("date", "desc"));
+
+        onSnapshot(q, (snapshot) => {
+            currentTrades = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            renderDashboard();
+        });
+
+        window.openModal = (id = null) => {
+            editingId = id;
+            if(id) {
+                const t = currentTrades.find(x => x.id === id);
+                document.getElementById('tSymbol').value = t.symbol;
+                document.getElementById('tEntry').value = t.entryPrice;
+                document.getElementById('tQty').value = t.qty;
+                document.getElementById('tStop').value = t.stopLoss;
+                document.getElementById('tNotes').value = t.notes;
+                document.getElementById('modalTitle').innerText = "Edit Trade";
+            } else {
+                document.getElementById('tSymbol').value = '';
+                document.getElementById('tEntry').value = '';
+                document.getElementById('tQty').value = '';
+                document.getElementById('tStop').value = '';
+                document.getElementById('tNotes').value = '';
+                document.getElementById('modalTitle').innerText = "New Trade";
+            }
+            document.getElementById('tradeModal').classList.remove('hidden');
+        };
+
+        window.saveTrade = async () => {
+            const file = document.getElementById('tImage').files[0];
+            let base64 = null;
+            if(file) {
+                base64 = await new Promise(r => {
+                    const reader = new FileReader();
+                    reader.onload = () => r(reader.result);
+                    reader.readAsDataURL(file);
+                });
+            }
+
+            const tradeData = {
+                symbol: document.getElementById('tSymbol').value.toUpperCase(),
+                entryPrice: parseFloat(document.getElementById('tEntry').value),
+                qty: parseInt(document.getElementById('tQty').value),
+                stopLoss: parseFloat(document.getElementById('tStop').value),
+                pfVal: parseFloat(document.getElementById('tPfVal').value) || 100000,
+                notes: document.getElementById('tNotes').value,
+                status: 'Open',
+                date: new Date().toISOString(),
+                livePrice: parseFloat(document.getElementById('tEntry').value),
+                image: base64 || null,
+                avgExitPrice: 0
+            };
+
+            if(editingId) {
+                const updateData = {...tradeData};
+                if(!base64) delete updateData.image; // Keep old image if no new one uploaded
+                await updateDoc(doc(db, "trades", editingId), updateData);
+            } else {
+                await addDoc(tradesCol, tradeData);
+            }
+            document.getElementById('tradeModal').classList.add('hidden');
+        };
+
+        window.updatePrices = async () => {
+            const btn = document.getElementById('refreshBtn');
+            btn.innerText = "Updating...";
+            for(let t of currentTrades) {
+                if(t.status === 'Open') {
+                    const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${t.symbol}&token=${FINNHUB_KEY}`);
+                    const data = await res.json();
+                    if(data.c) await updateDoc(doc(db, "trades", t.id), { livePrice: data.c });
+                }
+            }
+            btn.innerHTML = '<i data-lucide="refresh-cw" size="14"></i> Refresh Prices';
+            lucide.createIcons();
+        };
+
+        window.managePosition = (id) => {
+            const t = currentTrades.find(x => x.id === id);
+            document.getElementById('manageId').value = id;
+            document.getElementById('manageTitle').innerText = `Manage ${t.symbol}`;
+            document.getElementById('partialModal').classList.remove('hidden');
+        };
+
+        window.closePosition = async (isFull) => {
+            const id = document.getElementById('manageId').value;
+            const price = parseFloat(document.getElementById('exitPrice').value);
+            const qtyToClose = parseInt(document.getElementById('exitQty').value);
+            const t = currentTrades.find(x => x.id === id);
+
+            if(isFull || qtyToClose >= t.qty) {
+                await updateDoc(doc(db, "trades", id), { status: 'Closed', avgExitPrice: price });
+            } else {
+                // Partial: This logic keeps entry price but reduces shares
+                await updateDoc(doc(db, "trades", id), { qty: t.qty - qtyToClose });
+            }
+            document.getElementById('partialModal').classList.add('hidden');
+        };
+
+        window.deleteTrade = async (id) => {
+            if(confirm("Delete forever?")) await deleteDoc(doc(db, "trades", id));
+        };
+
+        function renderDashboard() {
+            const body = document.getElementById('logBody');
+            body.innerHTML = '';
+            let openPL = 0, openHeat = 0, totalExp = 0, pfVal = currentTrades[0]?.pfVal || 100000;
+
+            currentTrades.forEach(t => {
+                const cur = t.status === 'Closed' ? t.avgExitPrice : (t.livePrice || t.entryPrice);
+                const pl = (cur - t.entryPrice) * t.qty;
+                const plPct = ((cur - t.entryPrice) / t.entryPrice) * 100;
+                
+                if(t.status === 'Open') {
+                    openPL += pl;
+                    totalExp += (t.entryPrice * t.qty);
+                    openHeat += (cur - t.stopLoss) * t.qty;
+                }
+
+                body.insertAdjacentHTML('beforeend', `
+                    <tr class="border-b border-gray-800 text-sm hover:bg-gray-900">
+                        <td class="p-3 font-bold text-blue-400">${t.symbol}</td>
+                        <td class="p-3">$${t.entryPrice}</td>
+                        <td class="p-3">$${cur.toFixed(2)}</td>
+                        <td class="p-3 ${pl >= 0 ? 'text-green-500' : 'text-red-500'} font-bold">$${pl.toFixed(2)}</td>
+                        <td class="p-3 ${plPct >= 0 ? 'text-green-500' : 'text-red-500'}">${plPct.toFixed(2)}%</td>
+                        <td class="p-3 uppercase text-[10px] font-bold">${t.status}</td>
+                        <td class="p-3 flex gap-2">
+                            <button onclick="managePosition('${t.id}')" class="text-blue-400"><i data-lucide="scissors" size="14"></i></button>
+                            <button onclick="openModal('${t.id}')" class="text-gray-500"><i data-lucide="edit-3" size="14"></i></button>
+                            <button onclick="deleteTrade('${t.id}')" class="text-red-500"><i data-lucide="trash-2" size="14"></i></button>
+                            ${t.image ? `<button onclick="window.open().document.write('<img src=${t.image}>')" class="text-orange-400"><i data-lucide="image" size="14"></i></button>` : ''}
+                        </td>
+                    </tr>
+                `);
+            });
+
+            document.getElementById('statOpenPL').innerText = `$${openPL.toFixed(2)}`;
+            document.getElementById('statHeat').innerText = `$${openHeat.toFixed(2)}`;
+            document.getElementById('statExp').innerText = `${((totalExp/pfVal)*100).toFixed(1)}%`;
+            document.getElementById('statPF').innerText = `$${pfVal.toLocaleString()}`;
+            lucide.createIcons();
+        }
+
+        lucide.createIcons();
+    </script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f1f5f9; }
-        .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; }
-        input, select { background: #0f172a; border: 1px solid #334155; color: white; padding: 8px; border-radius: 6px; }
+        body { background: #0b0f1a; color: #f1f5f9; font-family: sans-serif; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; }
+        .input-field { background: #0d1117; border: 1px solid #30363d; color: white; padding: 8px; border-radius: 4px; width: 100%; margin-top: 5px; }
+        .stat-lbl { color: #8b949e; font-size: 0.65rem; font-weight: bold; text-transform: uppercase; }
     </style>
 </head>
-<body class="p-4 md:p-8">
-    <div class="max-w-6xl mx-auto">
-        <!-- Header -->
+<body class="p-4 md:p-10">
+    <div class="max-w-5xl mx-auto">
         <div class="flex justify-between items-center mb-8">
-            <h1 class="text-2xl font-bold flex items-center gap-2">
-                <i data-lucide="trending-up" class="text-blue-400"></i> Trading Journal
-            </h1>
-            <button onclick="toggleModal()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded-lg font-semibold transition">
-                + Log Trade
-            </button>
+            <h1 class="text-xl font-bold flex gap-2"><i data-lucide="zap" class="text-yellow-400"></i> Cloud Journal</h1>
+            <div class="flex gap-2">
+                <button id="refreshBtn" onclick="updatePrices()" class="bg-gray-800 px-4 py-2 rounded text-xs">Refresh Prices</button>
+                <button onclick="openModal()" class="bg-blue-600 px-4 py-2 rounded font-bold text-sm">+ Trade</button>
+            </div>
         </div>
 
-        <!-- Stats Grid -->
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="stats-grid">
-            <!-- Stats will be injected here by JS -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div class="card"><p class="stat-lbl">Open PL</p><p id="statOpenPL" class="text-lg font-bold text-green-400">$0</p></div>
+            <div class="card"><p class="stat-lbl">Open Heat</p><p id="statHeat" class="text-lg font-bold text-red-400">$0</p></div>
+            <div class="card"><p class="stat-lbl">Exposure</p><p id="statExp" class="text-lg font-bold">0%</p></div>
+            <div class="card"><p class="stat-lbl">Portfolio</p><p id="statPF" class="text-lg font-bold text-blue-400">$100,000</p></div>
         </div>
 
-        <!-- Trade Table -->
-        <div class="card overflow-x-auto">
-            <table class="w-full text-left border-collapse">
-                <thead>
-                    <tr class="border-b border-slate-700 text-slate-400 text-sm">
-                        <th class="p-4">Symbol</th>
-                        <th class="p-4">Date</th>
-                        <th class="p-4">Entry</th>
-                        <th class="p-4">Exit</th>
-                        <th class="p-4">P/L %</th>
-                        <th class="p-4">P/L $</th>
-                        <th class="p-4">Status</th>
+        <div class="card !p-0 overflow-hidden">
+            <table class="w-full text-left">
+                <thead class="bg-gray-800 text-[10px] uppercase text-gray-400">
+                    <tr>
+                        <th class="p-3">Ticker</th><th class="p-3">Entry</th><th class="p-3">Last</th><th class="p-3">P/L $</th><th class="p-3">%</th><th class="p-3">Status</th><th class="p-3">Actions</th>
                     </tr>
                 </thead>
-                <tbody id="trade-list">
-                    <!-- Trades injected here -->
-                </tbody>
+                <tbody id="logBody"></tbody>
             </table>
         </div>
     </div>
 
-    <!-- Add Trade Modal -->
-    <div id="modal" class="fixed inset-0 bg-black/80 hidden items-center justify-center p-4">
-        <div class="card p-6 w-full max-w-md">
-            <h2 class="text-xl font-bold mb-4">Add New Trade</h2>
-            <div class="grid gap-4">
-                <input type="text" id="symbol" placeholder="Symbol (e.g. AMD)">
-                <div class="grid grid-cols-2 gap-4">
-                    <input type="number" id="entryPrice" placeholder="Entry Price">
-                    <input type="number" id="qty" placeholder="Quantity">
-                </div>
-                <div class="grid grid-cols-2 gap-4">
-                    <input type="number" id="stopLoss" placeholder="Stop Loss">
-                    <input type="number" id="exitPrice" placeholder="Exit Price (Optional)">
-                </div>
-                <select id="status">
-                    <option value="Open">Open</option>
-                    <option value="Closed">Closed</option>
-                </select>
-                <div class="flex gap-2">
-                    <button onclick="saveTrade()" class="flex-1 bg-green-600 p-2 rounded-lg font-bold">Save Trade</button>
-                    <button onclick="toggleModal()" class="flex-1 bg-slate-700 p-2 rounded-lg font-bold">Cancel</button>
-                </div>
+    <!-- ADD MODAL -->
+    <div id="tradeModal" class="fixed inset-0 bg-black/90 hidden flex items-center justify-center p-4 z-50">
+        <div class="card w-full max-w-md">
+            <h2 id="modalTitle" class="font-bold mb-4">New Trade</h2>
+            <div class="grid grid-cols-2 gap-3">
+                <input type="text" id="tSymbol" placeholder="Ticker" class="input-field uppercase">
+                <input type="number" id="tPfVal" placeholder="PF Value" value="100000" class="input-field">
+                <input type="number" id="tEntry" placeholder="Entry Price" class="input-field">
+                <input type="number" id="tQty" placeholder="Quantity" class="input-field">
+                <input type="number" id="tStop" placeholder="Stop Loss" class="input-field">
+                <input type="file" id="tImage" class="text-[10px] mt-2">
+            </div>
+            <textarea id="tNotes" placeholder="Notes..." class="input-field mt-3 h-20"></textarea>
+            <div class="flex gap-2 mt-4">
+                <button onclick="saveTrade()" class="flex-1 bg-green-600 py-2 rounded font-bold">Save</button>
+                <button onclick="document.getElementById('tradeModal').classList.add('hidden')" class="flex-1 bg-gray-700 py-2 rounded">Cancel</button>
             </div>
         </div>
     </div>
 
-    <script>
-        // Load data from LocalStorage (Private to your browser)
-        let trades = JSON.parse(localStorage.getItem('trades')) || [];
-
-        function toggleModal() {
-            const modal = document.getElementById('modal');
-            modal.classList.toggle('hidden');
-            modal.classList.toggle('flex');
-        }
-
-        function saveTrade() {
-            const trade = {
-                id: Date.now(),
-                symbol: document.getElementById('symbol').value.toUpperCase(),
-                entryPrice: parseFloat(document.getElementById('entryPrice').value),
-                qty: parseFloat(document.getElementById('qty').value),
-                stopLoss: parseFloat(document.getElementById('stopLoss').value),
-                exitPrice: parseFloat(document.getElementById('exitPrice').value) || null,
-                status: document.getElementById('status').value,
-                date: new Date().toLocaleDateString()
-            };
-
-            trades.unshift(trade);
-            localStorage.setItem('trades', JSON.stringify(trades));
-            render();
-            toggleModal();
-        }
-
-        function calculateStats() {
-            const closedTrades = trades.filter(t => t.status === 'Closed');
-            const totalPL = closedTrades.reduce((sum, t) => sum + ((t.exitPrice - t.entryPrice) * t.qty), 0);
-            const wins = closedTrades.filter(t => t.exitPrice > t.entryPrice).length;
-            const winRate = closedTrades.length > 0 ? (wins / closedTrades.length * 100).toFixed(1) : 0;
-            
-            return [
-                { label: 'Total P/L', value: `$${totalPL.toFixed(2)}`, color: totalPL >= 0 ? 'text-green-400' : 'text-red-400' },
-                { label: 'Win Rate', value: `${winRate}%`, color: 'text-blue-400' },
-                { label: 'Trades', value: trades.length, color: 'text-slate-400' },
-                { label: 'Open Heat', value: trades.filter(t => t.status === 'Open').length, color: 'text-orange-400' }
-            ];
-        }
-
-        function render() {
-            // Render Stats
-            const statsGrid = document.getElementById('stats-grid');
-            statsGrid.innerHTML = calculateStats().map(s => `
-                <div class="card p-4">
-                    <div class="text-xs text-slate-400 uppercase font-bold">${s.label}</div>
-                    <div class="text-2xl font-bold ${s.color}">${s.value}</div>
-                </div>
-            `).join('');
-
-            // Render Table
-            const list = document.getElementById('trade-list');
-            list.innerHTML = trades.map(t => {
-                const pl = t.exitPrice ? (t.exitPrice - t.entryPrice) * t.qty : 0;
-                const plPct = t.exitPrice ? ((t.exitPrice - t.entryPrice) / t.entryPrice * 100).toFixed(2) : '0.00';
-                return `
-                <tr class="border-b border-slate-800 hover:bg-slate-800/50 transition">
-                    <td class="p-4 font-bold">${t.symbol}</td>
-                    <td class="p-4 text-sm text-slate-400">${t.date}</td>
-                    <td class="p-4">$${t.entryPrice}</td>
-                    <td class="p-4">${t.exitPrice ? '$'+t.exitPrice : '-'}</td>
-                    <td class="p-4 ${pl >= 0 ? 'text-green-400' : 'text-red-400'}">${plPct}%</td>
-                    <td class="p-4 ${pl >= 0 ? 'text-green-400' : 'text-red-400'} font-semibold">$${pl.toFixed(2)}</td>
-                    <td class="p-4"><span class="px-2 py-1 rounded text-xs font-bold ${t.status === 'Open' ? 'bg-orange-500/20 text-orange-500' : 'bg-blue-500/20 text-blue-500'}">${t.status}</span></td>
-                </tr>
-                `;
-            }).join('');
-        }
-
-        // Initialize Lucide icons and initial render
-        render();
-        lucide.createIcons();
-    </script>
+    <!-- MANAGE MODAL -->
+    <div id="partialModal" class="fixed inset-0 bg-black/90 hidden flex items-center justify-center z-50">
+        <div class="card w-64">
+            <input type="hidden" id="manageId">
+            <h3 id="manageTitle" class="font-bold mb-4">Manage Position</h3>
+            <input type="number" id="exitPrice" placeholder="Exit Price" class="input-field">
+            <input type="number" id="exitQty" placeholder="Qty to Close" class="input-field mt-2">
+            <button onclick="closePosition(false)" class="w-full bg-blue-600 py-2 rounded font-bold mt-4">Partial Close</button>
+            <button onclick="closePosition(true)" class="w-full bg-red-600 py-2 rounded font-bold mt-2">Full Close</button>
+            <button onclick="document.getElementById('partialModal').classList.add('hidden')" class="w-full bg-gray-700 py-2 rounded mt-2">Cancel</button>
+        </div>
+    </div>
 </body>
 </html>
