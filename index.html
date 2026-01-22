@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Trading Journal v5</title>
+    <title>Pro Trading Journal v6</title>
     
     <!-- LIBRARIES -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -34,6 +34,7 @@
         // --- STATE ---
         let trades = [];
         let settings = { startBalance: 100000, adjustments: 0 }; 
+        let currentEquity = 100000;
         let winLossChart, avgRetChart;
         let filterType = 'ALL';
 
@@ -96,20 +97,24 @@
                     return;
                 }
 
+                // Get existing trade if editing to preserve data
+                const existing = id ? trades.find(t => t.id === id) : null;
+
                 const tradeData = {
                     symbol: document.getElementById('tSymbol').value.toUpperCase(),
                     direction: dir,
                     entryPrice: entry,
                     qty: qty,
                     stopLoss: parseFloat(document.getElementById('tStop').value) || 0,
-                    notes: document.getElementById('tNotes').value,
-                    date: new Date(dateVal).toISOString(), // Saves the edited date
-                    status: id ? trades.find(t=>t.id===id).status : 'Open',
+                    notes: document.getElementById('tNotes').value || "",
+                    date: new Date(dateVal).toISOString(),
+                    status: existing ? existing.status : 'Open',
                     livePrice: entry,
-                    avgExitPrice: id ? trades.find(t=>t.id===id).avgExitPrice : 0,
-                    exitDate: id ? trades.find(t=>t.id===id).exitDate : null,
-                    entryImage: base64 || (id ? trades.find(t=>t.id===id).entryImage : null),
-                    exitImage: id ? trades.find(t=>t.id===id).exitImage : null
+                    // FIX: Use || null to prevent "undefined" error in Firebase
+                    avgExitPrice: existing?.avgExitPrice || 0,
+                    exitDate: existing?.exitDate || null,
+                    entryImage: base64 || (existing?.entryImage || null),
+                    exitImage: existing?.exitImage || null
                 };
 
                 if(id) await updateDoc(doc(db, "trades", id), tradeData);
@@ -152,12 +157,38 @@
             toggleModal('partialModal');
         };
 
-        // ROBUST FILTER LOGIC
+        // CALCULATOR LOGIC
+        window.updateCalculator = () => {
+            const entry = parseFloat(document.getElementById('calcEntry').value);
+            const stop = parseFloat(document.getElementById('calcStop').value);
+            
+            if (!entry || !stop) return;
+
+            const riskPerShare = Math.abs(entry - stop);
+            const stopPct = (riskPerShare / entry) * 100;
+            
+            document.getElementById('calcSLPct').innerText = stopPct.toFixed(2) + '%';
+            
+            // Function to fill row
+            const fillRow = (pct, idSuffix) => {
+                const riskAmount = currentEquity * (pct / 100);
+                const shares = Math.floor(riskAmount / riskPerShare);
+                const posSize = shares * entry;
+                
+                document.getElementById(`risk${idSuffix}`).innerText = `$${riskAmount.toFixed(0)}`;
+                document.getElementById(`pos${idSuffix}`).innerText = `$${posSize.toLocaleString(undefined, {maximumFractionDigits:0})}`;
+                document.getElementById(`share${idSuffix}`).innerText = shares;
+            };
+
+            fillRow(1.00, '100');
+            fillRow(0.50, '050');
+            fillRow(0.25, '025');
+        };
+
+        // FILTER LOGIC
         function getFilteredTrades() {
             const now = new Date();
             let filtered = [];
-            
-            // Filter out corrupted data first
             const validTrades = trades.filter(t => t.date && !isNaN(new Date(t.date).getTime()));
 
             if (filterType === 'CUST_NUM') {
@@ -190,27 +221,20 @@
             filterType = type;
             document.getElementById('customDateInputs').classList.add('hidden');
             document.getElementById('customNumInput').classList.add('hidden');
-            
             if(type === 'CUST_DATE') document.getElementById('customDateInputs').classList.remove('hidden');
             if(type === 'CUST_NUM') document.getElementById('customNumInput').classList.remove('hidden');
-            
             document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('bg-blue-600', 'text-white'));
             document.getElementById(`btn-${type}`).classList.add('bg-blue-600', 'text-white');
             document.getElementById(`btn-${type}`).classList.remove('text-gray-400');
-
             updateDashboard();
         };
 
-        // DASHBOARD RENDER (With Error Handling)
         function updateDashboard() {
             let totalRealizedALL = 0, totalOpenALL = 0, totalOpenHeatDollars = 0, totalExp = 0;
 
-            // 1. Calculate Equity (Try/Catch loop to ignore bad data)
             trades.forEach(t => {
                 try {
-                    // Skip if critical data missing
                     if(!t.entryPrice || !t.qty || !t.date) return;
-
                     const isLong = t.direction !== 'Short';
                     const cur = t.status === 'Closed' ? (t.avgExitPrice || t.entryPrice) : (t.livePrice || t.entryPrice);
                     let pl = isLong ? (cur - t.entryPrice) * t.qty : (t.entryPrice - cur) * t.qty;
@@ -228,10 +252,12 @@
 
             const startBal = settings.startBalance;
             const adjs = settings.adjustments || 0;
-            const equity = startBal + adjs + totalRealizedALL + totalOpenALL;
+            currentEquity = startBal + adjs + totalRealizedALL + totalOpenALL; // Update global
             const cash = startBal + adjs + totalRealizedALL;
 
-            // 2. Filter & Display
+            // Trigger calc update if values exist
+            window.updateCalculator();
+
             const displayTrades = getFilteredTrades();
             let statWins = [], statLosses = [];
             
@@ -251,10 +277,10 @@
                     const days = !isNaN(d1) && !isNaN(d2) ? Math.max(0, Math.floor((d2 - d1) / (1000 * 60 * 60 * 24))) : 0;
 
                     let heatDollar = Math.abs(t.entryPrice - (t.stopLoss||t.entryPrice)) * t.qty;
-                    let heatPct = equity > 0 ? (heatDollar / equity) * 100 : 0;
+                    let heatPct = currentEquity > 0 ? (heatDollar / currentEquity) * 100 : 0;
                     let totalRisk = heatDollar;
                     let rr = totalRisk > 0 ? (pl / totalRisk).toFixed(2) : 0;
-                    let sizePct = equity > 0 ? ((t.entryPrice * t.qty) / equity) * 100 : 0;
+                    let sizePct = currentEquity > 0 ? ((t.entryPrice * t.qty) / currentEquity) * 100 : 0;
 
                     if (isClosed) {
                         if (pl > 0) statWins.push({pl, days, plPct});
@@ -286,15 +312,14 @@
                             <button onclick="openEdit('${t.id}')" class="text-gray-400 p-1 hover:bg-gray-700 rounded"><i data-lucide="edit-3" size="14"></i></button>
                             ${t.entryImage ? `<button onclick="showImage('${t.entryImage}')" class="text-orange-400 p-1 hover:bg-gray-700 rounded"><i data-lucide="image" size="14"></i></button>` : ''}
                             ${t.exitImage ? `<button onclick="showImage('${t.exitImage}')" class="text-purple-400 p-1 hover:bg-gray-700 rounded"><i data-lucide="flag" size="14"></i></button>` : ''}
-                            <button onclick="deleteTrade('${t.id}')" class="text-red-500 p-1 hover:bg-gray-700 rounded lg:hidden"><i data-lucide="trash-2" size="14"></i></button>
                         </td>
                     </tr>`;
-                } catch (e) { return ''; } // If row fails, return empty
+                } catch (e) { return ''; }
             }).join('');
 
             document.getElementById('tradeTable').innerHTML = rows;
 
-            // C. STATS
+            // Stats
             const nWins = statWins.length;
             const nLoss = statLosses.length;
             const totalCount = nWins + nLoss;
@@ -308,14 +333,13 @@
             const avgWinPct = nWins ? statWins.reduce((a,b)=>a+b.plPct,0)/nWins : 0;
             const avgLossPct = nLoss ? statLosses.reduce((a,b)=>a+b.plPct,0)/nLoss : 0;
 
-            // D. INJECT
-            document.getElementById('statEquity').innerText = `$${equity.toLocaleString(undefined, {maximumFractionDigits:0})}`;
+            document.getElementById('statEquity').innerText = `$${currentEquity.toLocaleString(undefined, {maximumFractionDigits:0})}`;
             document.getElementById('statBalance').innerText = `Cash: $${cash.toLocaleString(undefined, {maximumFractionDigits:0})}`;
             document.getElementById('statOpenPL').innerText = `$${totalOpenALL.toFixed(2)}`;
             document.getElementById('statOpenPL').className = totalOpenALL >= 0 ? 'text-2xl font-bold text-green-500' : 'text-2xl font-bold text-red-500';
-            const heatPctTotal = equity > 0 ? (totalOpenHeatDollars / equity) * 100 : 0;
+            const heatPctTotal = currentEquity > 0 ? (totalOpenHeatDollars / currentEquity) * 100 : 0;
             document.getElementById('statHeat').innerHTML = `<span class="text-red-400">$${totalOpenHeatDollars.toFixed(0)}</span> <span class="text-gray-500 text-sm">(${heatPctTotal.toFixed(1)}%)</span>`;
-            document.getElementById('statExp').innerText = equity > 0 ? ((totalExp/equity)*100).toFixed(1) + '%' : '0%';
+            document.getElementById('statExp').innerText = currentEquity > 0 ? ((totalExp/currentEquity)*100).toFixed(1) + '%' : '0%';
             
             document.getElementById('advRRR').innerText = rrr;
             document.getElementById('advAvgWin').innerText = `$${avgWin.toFixed(0)}`;
@@ -326,7 +350,6 @@
             document.getElementById('advHoldWin').innerText = avgHoldWin.toFixed(1) + 'd';
             document.getElementById('advHoldLoss').innerText = avgHoldLoss.toFixed(1) + 'd';
 
-            // E. CHARTS
             const winRate = totalCount > 0 ? ((nWins/totalCount)*100).toFixed(2) : "0.00";
             const lossRate = totalCount > 0 ? ((nLoss/totalCount)*100).toFixed(2) : "0.00";
             
@@ -342,33 +365,19 @@
             if(winLossChart) winLossChart.destroy();
             if(avgRetChart) avgRetChart.destroy();
 
-            const chartOpts = { 
-                cutout: '70%', 
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false }, tooltip: { enabled: false } } 
-            };
+            const chartOpts = { cutout: '70%', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { enabled: false } } };
 
-            winLossChart = new Chart(ctx1, {
-                type: 'doughnut',
-                data: { datasets: [{ data: [nWins, nLoss], backgroundColor: ['#22c55e', '#ef4444'], borderWidth: 0 }] },
-                options: chartOpts
-            });
+            winLossChart = new Chart(ctx1, { type: 'doughnut', data: { datasets: [{ data: [nWins, nLoss], backgroundColor: ['#22c55e', '#ef4444'], borderWidth: 0 }] }, options: chartOpts });
 
             let d2 = [Math.abs(avgWinPct), Math.abs(avgLossPct)];
             let c2 = ['#22c55e', '#ef4444'];
             if (d2[0] === 0 && d2[1] === 0) { d2=[1]; c2=['#334155']; }
 
-            avgRetChart = new Chart(ctx2, {
-                type: 'doughnut',
-                data: { datasets: [{ data: d2, backgroundColor: c2, borderWidth: 0 }] },
-                options: chartOpts
-            });
+            avgRetChart = new Chart(ctx2, { type: 'doughnut', data: { datasets: [{ data: d2, backgroundColor: c2, borderWidth: 0 }] }, options: chartOpts });
 
             lucide.createIcons();
         }
 
-        // --- HELPERS ---
         window.saveSettings = async () => {
             const start = parseFloat(document.getElementById('setStart').value);
             const dep = parseFloat(document.getElementById('setDeposit').value) || 0;
@@ -404,13 +413,9 @@
             document.getElementById('editTradeId').value = id || '';
             document.getElementById('modalTitle').innerText = id ? 'Edit Trade' : 'New Trade';
             
-            // Show/Hide Delete Button
             const delBtn = document.getElementById('modalDeleteBtn');
-            if(id) {
-                delBtn.classList.remove('hidden');
-            } else {
-                delBtn.classList.add('hidden');
-            }
+            if(id) delBtn.classList.remove('hidden');
+            else delBtn.classList.add('hidden');
 
             if(id) {
                 const t = trades.find(x=>x.id===id);
@@ -449,7 +454,7 @@
         window.deleteTrade = async (id) => {
             if(confirm("Are you sure you want to delete this trade permanently?")) {
                 await deleteDoc(doc(db, "trades", id));
-                toggleModal('tradeModal'); // Close modal if open
+                toggleModal('tradeModal');
             }
         };
         
@@ -474,13 +479,15 @@
         .filter-btn { padding: 4px 10px; border-radius: 6px; font-size: 10px; font-weight: bold; text-transform: uppercase; cursor: pointer; transition: 0.2s; }
         ::-webkit-scrollbar { height: 6px; width: 6px; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        .calc-lbl { font-size: 10px; color: #64748b; font-weight: bold; }
+        .calc-val { font-size: 12px; font-weight: bold; color: #f1f5f9; }
     </style>
 </head>
 <body class="p-4 md:p-8 max-w-[1800px] mx-auto pb-20">
 
     <!-- HEADER -->
     <div class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
-        <h1 class="text-2xl font-bold flex items-center gap-2"><i data-lucide="bar-chart-2" class="text-blue-500"></i> TraderPro <span class="text-xs bg-gray-800 px-2 rounded">v5</span></h1>
+        <h1 class="text-2xl font-bold flex items-center gap-2"><i data-lucide="bar-chart-2" class="text-blue-500"></i> TraderPro <span class="text-xs bg-gray-800 px-2 rounded">v6</span></h1>
         <div class="flex gap-2">
             <button onclick="openSettings()" class="bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded text-gray-300 flex items-center gap-2 text-xs font-bold uppercase"><i data-lucide="wallet" size="14"></i> Wallet</button>
             <button id="refreshBtn" onclick="refreshPrices()" class="bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded text-blue-400 flex items-center gap-2 text-xs font-bold uppercase"><i data-lucide="refresh-cw" size="14"></i> Live Prices</button>
@@ -507,7 +514,7 @@
         </div>
     </div>
 
-    <!-- STATS DASHBOARD -->
+    <!-- MAIN GRID -->
     <div class="grid grid-cols-1 lg:grid-cols-6 gap-4 mb-6">
         
         <!-- 1. LIVE PORTFOLIO -->
@@ -521,7 +528,7 @@
         </div>
 
         <!-- 2. FILTERED PERFORMANCE METRICS -->
-        <div class="lg:col-span-3 card grid grid-cols-4 md:grid-cols-4 gap-4">
+        <div class="lg:col-span-2 card grid grid-cols-4 md:grid-cols-4 gap-4">
             <div class="text-center"><span class="stat-lbl">Trades</span><div id="advCount" class="stat-val">0</div></div>
             <div class="text-center"><span class="stat-lbl">RRR</span><div id="advRRR" class="stat-val text-blue-400">0</div></div>
             <div class="text-center"><span class="stat-lbl">Avg Win</span><div id="advAvgWin" class="stat-val text-green-400">$0</div></div>
@@ -532,7 +539,41 @@
             <div class="text-center"><span class="stat-lbl">Hold Loss</span><div id="advHoldLoss" class="stat-val">0d</div></div>
         </div>
 
-        <!-- 3. DUAL CHARTS -->
+        <!-- 3. POSITION CALCULATOR (NEW) -->
+        <div class="lg:col-span-1 card p-3 flex flex-col justify-between">
+            <div class="font-bold text-xs text-gray-400 uppercase mb-2">Position Sizing</div>
+            <div class="grid grid-cols-2 gap-2 mb-2">
+                <input id="calcEntry" type="number" placeholder="Entry $" class="input-field text-xs" oninput="updateCalculator()">
+                <input id="calcStop" type="number" placeholder="Stop $" class="input-field text-xs" oninput="updateCalculator()">
+            </div>
+            <div class="flex justify-between items-center mb-2 px-1">
+                <span class="text-[10px] text-gray-500">Stop %:</span>
+                <span id="calcSLPct" class="text-xs font-bold text-orange-400">0.00%</span>
+            </div>
+            <table class="w-full text-right text-[10px]">
+                <tr class="text-gray-500"><th>Risk</th><th>$ Risk</th><th>$ Pos</th><th>Shares</th></tr>
+                <tr>
+                    <td class="font-bold text-white bg-gray-800 rounded px-1">1.0%</td>
+                    <td id="risk100" class="text-gray-300">0</td>
+                    <td id="pos100" class="font-bold text-white">0</td>
+                    <td id="share100" class="text-blue-400 font-bold">0</td>
+                </tr>
+                <tr>
+                    <td class="font-bold text-white bg-gray-800 rounded px-1">0.5%</td>
+                    <td id="risk050" class="text-gray-300">0</td>
+                    <td id="pos050" class="font-bold text-white">0</td>
+                    <td id="share050" class="text-blue-400 font-bold">0</td>
+                </tr>
+                <tr>
+                    <td class="font-bold text-white bg-gray-800 rounded px-1">0.25%</td>
+                    <td id="risk025" class="text-gray-300">0</td>
+                    <td id="pos025" class="font-bold text-white">0</td>
+                    <td id="share025" class="text-blue-400 font-bold">0</td>
+                </tr>
+            </table>
+        </div>
+
+        <!-- 4. DUAL CHARTS -->
         <div class="lg:col-span-2 card flex flex-col items-center justify-center p-4">
             <div class="flex w-full justify-around mb-2">
                 <div class="text-center w-1/2 font-bold text-[10px] text-gray-400 uppercase">Win/Loss Ratio</div>
