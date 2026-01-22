@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pro Trading Journal v6</title>
+    <title>Pro Trading Journal v7</title>
     
     <!-- LIBRARIES -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -73,7 +73,7 @@
             };
         });
 
-        // SAVE TRADE (New or Edit)
+        // SAVE TRADE
         window.saveTrade = async () => {
             try {
                 const saveBtn = document.getElementById('saveTradeBtn');
@@ -88,7 +88,6 @@
                 const dir = document.getElementById('tDirection').value;
                 const dateVal = document.getElementById('tDate').value || new Date().toISOString();
 
-                // Validation
                 const entry = parseFloat(document.getElementById('tEntry').value);
                 const qty = parseFloat(document.getElementById('tQty').value);
                 
@@ -97,7 +96,6 @@
                     return;
                 }
 
-                // Get existing trade if editing to preserve data
                 const existing = id ? trades.find(t => t.id === id) : null;
 
                 const tradeData = {
@@ -110,7 +108,6 @@
                     date: new Date(dateVal).toISOString(),
                     status: existing ? existing.status : 'Open',
                     livePrice: entry,
-                    // FIX: Use || null to prevent "undefined" error in Firebase
                     avgExitPrice: existing?.avgExitPrice || 0,
                     exitDate: existing?.exitDate || null,
                     entryImage: base64 || (existing?.entryImage || null),
@@ -161,28 +158,55 @@
         window.updateCalculator = () => {
             const entry = parseFloat(document.getElementById('calcEntry').value);
             const stop = parseFloat(document.getElementById('calcStop').value);
+            const fixedRisk = parseFloat(document.getElementById('calcFixedRisk').value);
+            const posPct = parseFloat(document.getElementById('calcPosPct').value);
             
-            if (!entry || !stop) return;
+            if (!entry) return;
 
-            const riskPerShare = Math.abs(entry - stop);
-            const stopPct = (riskPerShare / entry) * 100;
+            // 1. Calculate Stop %
+            let riskPerShare = 0;
+            if(stop) {
+                riskPerShare = Math.abs(entry - stop);
+                const stopPct = (riskPerShare / entry) * 100;
+                document.getElementById('calcSLPct').innerText = stopPct.toFixed(2) + '%';
+            } else {
+                document.getElementById('calcSLPct').innerText = '0.00%';
+            }
             
-            document.getElementById('calcSLPct').innerText = stopPct.toFixed(2) + '%';
-            
-            // Function to fill row
+            // 2. Standard Table
             const fillRow = (pct, idSuffix) => {
+                if(!stop) {
+                    document.getElementById(`share${idSuffix}`).innerText = '-';
+                    return;
+                }
                 const riskAmount = currentEquity * (pct / 100);
                 const shares = Math.floor(riskAmount / riskPerShare);
-                const posSize = shares * entry;
-                
                 document.getElementById(`risk${idSuffix}`).innerText = `$${riskAmount.toFixed(0)}`;
-                document.getElementById(`pos${idSuffix}`).innerText = `$${posSize.toLocaleString(undefined, {maximumFractionDigits:0})}`;
                 document.getElementById(`share${idSuffix}`).innerText = shares;
             };
 
             fillRow(1.00, '100');
             fillRow(0.50, '050');
             fillRow(0.25, '025');
+
+            // 3. Custom Fixed Risk ($)
+            if(fixedRisk && stop) {
+                const shares = Math.floor(fixedRisk / riskPerShare);
+                document.getElementById('resFixedRiskShares').innerText = shares + " shares";
+            } else {
+                document.getElementById('resFixedRiskShares').innerText = "-";
+            }
+
+            // 4. Custom Position Size (%)
+            if(posPct) {
+                const totalCapital = currentEquity * (posPct / 100);
+                const shares = Math.floor(totalCapital / entry);
+                document.getElementById('resPosPctShares').innerText = shares + " shares";
+                document.getElementById('resPosPctAmt').innerText = `($${totalCapital.toFixed(0)})`;
+            } else {
+                document.getElementById('resPosPctShares').innerText = "-";
+                document.getElementById('resPosPctAmt').innerText = "";
+            }
         };
 
         // FILTER LOGIC
@@ -487,7 +511,7 @@
 
     <!-- HEADER -->
     <div class="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
-        <h1 class="text-2xl font-bold flex items-center gap-2"><i data-lucide="bar-chart-2" class="text-blue-500"></i> TraderPro <span class="text-xs bg-gray-800 px-2 rounded">v6</span></h1>
+        <h1 class="text-2xl font-bold flex items-center gap-2"><i data-lucide="bar-chart-2" class="text-blue-500"></i> TraderPro <span class="text-xs bg-gray-800 px-2 rounded">v7</span></h1>
         <div class="flex gap-2">
             <button onclick="openSettings()" class="bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded text-gray-300 flex items-center gap-2 text-xs font-bold uppercase"><i data-lucide="wallet" size="14"></i> Wallet</button>
             <button id="refreshBtn" onclick="refreshPrices()" class="bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded text-blue-400 flex items-center gap-2 text-xs font-bold uppercase"><i data-lucide="refresh-cw" size="14"></i> Live Prices</button>
@@ -527,7 +551,7 @@
             </div>
         </div>
 
-        <!-- 2. FILTERED PERFORMANCE METRICS -->
+        <!-- 2. FILTERED METRICS -->
         <div class="lg:col-span-2 card grid grid-cols-4 md:grid-cols-4 gap-4">
             <div class="text-center"><span class="stat-lbl">Trades</span><div id="advCount" class="stat-val">0</div></div>
             <div class="text-center"><span class="stat-lbl">RRR</span><div id="advRRR" class="stat-val text-blue-400">0</div></div>
@@ -539,41 +563,7 @@
             <div class="text-center"><span class="stat-lbl">Hold Loss</span><div id="advHoldLoss" class="stat-val">0d</div></div>
         </div>
 
-        <!-- 3. POSITION CALCULATOR (NEW) -->
-        <div class="lg:col-span-1 card p-3 flex flex-col justify-between">
-            <div class="font-bold text-xs text-gray-400 uppercase mb-2">Position Sizing</div>
-            <div class="grid grid-cols-2 gap-2 mb-2">
-                <input id="calcEntry" type="number" placeholder="Entry $" class="input-field text-xs" oninput="updateCalculator()">
-                <input id="calcStop" type="number" placeholder="Stop $" class="input-field text-xs" oninput="updateCalculator()">
-            </div>
-            <div class="flex justify-between items-center mb-2 px-1">
-                <span class="text-[10px] text-gray-500">Stop %:</span>
-                <span id="calcSLPct" class="text-xs font-bold text-orange-400">0.00%</span>
-            </div>
-            <table class="w-full text-right text-[10px]">
-                <tr class="text-gray-500"><th>Risk</th><th>$ Risk</th><th>$ Pos</th><th>Shares</th></tr>
-                <tr>
-                    <td class="font-bold text-white bg-gray-800 rounded px-1">1.0%</td>
-                    <td id="risk100" class="text-gray-300">0</td>
-                    <td id="pos100" class="font-bold text-white">0</td>
-                    <td id="share100" class="text-blue-400 font-bold">0</td>
-                </tr>
-                <tr>
-                    <td class="font-bold text-white bg-gray-800 rounded px-1">0.5%</td>
-                    <td id="risk050" class="text-gray-300">0</td>
-                    <td id="pos050" class="font-bold text-white">0</td>
-                    <td id="share050" class="text-blue-400 font-bold">0</td>
-                </tr>
-                <tr>
-                    <td class="font-bold text-white bg-gray-800 rounded px-1">0.25%</td>
-                    <td id="risk025" class="text-gray-300">0</td>
-                    <td id="pos025" class="font-bold text-white">0</td>
-                    <td id="share025" class="text-blue-400 font-bold">0</td>
-                </tr>
-            </table>
-        </div>
-
-        <!-- 4. DUAL CHARTS -->
+        <!-- 3. DUAL CHARTS -->
         <div class="lg:col-span-2 card flex flex-col items-center justify-center p-4">
             <div class="flex w-full justify-around mb-2">
                 <div class="text-center w-1/2 font-bold text-[10px] text-gray-400 uppercase">Win/Loss Ratio</div>
@@ -596,6 +586,44 @@
             <div class="mt-4 bg-green-900/30 border border-green-800 px-6 py-1 rounded text-center">
                 <span class="font-bold text-gray-400 text-xs mr-2">RRR</span>
                 <span class="font-bold text-xl text-green-400" id="chartRRR">0.00</span>
+            </div>
+        </div>
+
+        <!-- 4. POSITION CALCULATOR -->
+        <div class="lg:col-span-1 card p-3 flex flex-col justify-between">
+            <div class="font-bold text-xs text-gray-400 uppercase mb-2">Position Sizing</div>
+            
+            <!-- Standard Inputs -->
+            <div class="grid grid-cols-2 gap-2 mb-2">
+                <input id="calcEntry" type="number" placeholder="Entry $" class="input-field text-xs" oninput="updateCalculator()">
+                <input id="calcStop" type="number" placeholder="Stop $" class="input-field text-xs" oninput="updateCalculator()">
+            </div>
+            <div class="flex justify-between items-center mb-2 px-1">
+                <span class="text-[10px] text-gray-500">Stop %:</span>
+                <span id="calcSLPct" class="text-xs font-bold text-orange-400">0.00%</span>
+            </div>
+            
+            <!-- Auto Table -->
+            <table class="w-full text-right text-[10px] mb-3">
+                <tr class="text-gray-500"><th>Risk</th><th>$ Risk</th><th>Shares</th></tr>
+                <tr><td class="font-bold text-white">1.0%</td><td id="risk100" class="text-gray-300">0</td><td id="share100" class="text-blue-400 font-bold">0</td></tr>
+                <tr><td class="font-bold text-white">0.5%</td><td id="risk050" class="text-gray-300">0</td><td id="share050" class="text-blue-400 font-bold">0</td></tr>
+                <tr><td class="font-bold text-white">0.25%</td><td id="risk025" class="text-gray-300">0</td><td id="share025" class="text-blue-400 font-bold">0</td></tr>
+            </table>
+
+            <!-- Custom Sizing -->
+            <div class="border-t border-gray-700 pt-2 space-y-2">
+                <div class="flex justify-between items-center gap-2">
+                    <input id="calcFixedRisk" type="number" placeholder="Fixed Risk $" class="input-field text-xs w-1/2" oninput="updateCalculator()">
+                    <span id="resFixedRiskShares" class="text-xs font-bold text-blue-400 w-1/2 text-right">-</span>
+                </div>
+                <div class="flex justify-between items-center gap-2">
+                    <input id="calcPosPct" type="number" placeholder="Pos Size %" class="input-field text-xs w-1/2" oninput="updateCalculator()">
+                    <div class="w-1/2 text-right">
+                        <div id="resPosPctShares" class="text-xs font-bold text-blue-400">-</div>
+                        <div id="resPosPctAmt" class="text-[9px] text-gray-500"></div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
